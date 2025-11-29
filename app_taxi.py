@@ -5,6 +5,7 @@ import os
 import json
 import uuid
 from datetime import datetime, timedelta
+from tkcalendar import DateEntry
 
 # --- CONFIGURATION PAGE ---
 st.set_page_config(page_title="MonTaxi31", page_icon="🚖", layout="wide")
@@ -13,123 +14,110 @@ st.set_page_config(page_title="MonTaxi31", page_icon="🚖", layout="wide")
 FILES = {
     "dep": "depenses_flotte.csv",
     "chauf": "chauffeurs.csv",
+    "taxis": "taxis.csv",
     "rev": "revenus_hebdo.csv",
     "conf": "config_taxi.json"
 }
 
+BG_JAUNE = "#FFFFE0"
 
-# --- CHARGEMENT CONFIG ---
-def load_config():
-    default = {
-        "cout_appel": 1.05, "pct_chauf": 40.0, "taux_impot": 18.0,
-        "tps": 5.0, "tvq": 9.975,
-        "cats": ["Mécanique", "Carrosserie", "Pneus", "Assurance", "SAAQ", "Admin", "Pièces", "Autre"]
-    }
+DEFAULT_CONFIG = {
+    "cout_appel": 1.05, "pct_chauf": 40.0, "taux_impot": 18.0,
+    "taux_tps": 5.0, "taux_tvq": 9.975,
+    "categories": ["Réparation mécanique", "Carrosserie", "Pneus", "Assurance", "SAAQ", "Admin", "Pièces", "Autre"]
+}
+
+
+# --- GESTION PARAMÈTRES ---
+def charger_config():
+    config = DEFAULT_CONFIG.copy()
     if os.path.exists(FILES["conf"]):
         try:
-            with open(FILES["conf"], 'r') as f:
-                return {**default, **json.load(f)}
+            config.update(json.load(open(FILES["conf"], 'r', encoding='utf-8')))
         except:
             pass
-    return default
+    return config
 
 
 def save_config(cfg):
-    with open(FILES["conf"], 'w') as f: json.dump(cfg, f, indent=4)
+    with open(FILES["conf"], 'w', encoding='utf-8') as f: json.dump(cfg, f, indent=4)
 
 
-CONFIG = load_config()
+CONFIG = charger_config()
 
 
-# --- GESTION DONNÉES (BLINDÉE) ---
+# --- UTILITAIRES ---
+def safe_float(valeur):
+    if not valeur: return 0.0
+    try:
+        return float(str(valeur).replace(',', '.').replace('$', '').replace(' ', ''))
+    except:
+        return 0.0
+
+
+def verifier_fichiers():
+    cols_schema = {
+        "dep": ["Date", "Mois", "Annee", "Trimestre", "Taxi", "Chauffeur", "Categorie", "Details", "HT", "TPS", "TVQ",
+                "Montant_Total", "UUID"],
+        "chauf": ["Nom", "Prenom", "License_ID", "Adresse", "Matricule", "Telephone", "Note", "UUID"],
+        "taxis": ["Taxi_ID", "Immatriculation", "Chauffeur_Defaut", "UUID"],
+        "rev": ["Date_Debut", "Date_Fin", "Mois", "Annee", "Trimestre", "Taxi", "Chauffeur",
+                "Meter_Deb", "Meter_Fin", "Meter_Total", "Fixe", "Total_Brut", "Nb_Appels",
+                "Redevance", "Base_Salaire", "Salaire_Chauffeur", "STS", "Credits", "Prix_Fixes",
+                "Visa", "Essence", "Lavage", "Divers", "Impot", "Grand_Total_Remis", "UUID"]
+    }
+    for key, cols in cols_schema.items():
+        if not os.path.exists(FILES[key]):
+            pd.DataFrame(columns=cols).to_csv(FILES[key], index=False)
+        else:
+            try:
+                df = pd.read_csv(FILES[key])
+                changed = False
+                for c in cols:
+                    if c not in df.columns:
+                        df[c] = "" if c != "UUID" else [str(uuid.uuid4()) for _ in range(len(df))]
+                        changed = True
+                if changed: df.to_csv(FILES[key], index=False)
+            except:
+                pass
+
+
 def load_data(key):
-    # Définition des colonnes attendues (Nouvelle version)
-    cols_expected = []
-    if key == "dep":
-        cols_expected = ["Date", "Mois", "Annee", "Trimestre", "Taxi", "Chauffeur", "Categorie", "Details", "HT", "TPS",
-                         "TVQ", "Total", "UUID"]
-    elif key == "chauf":
-        cols_expected = ["Nom", "Prenom", "Matricule", "Telephone", "Note", "UUID"]
-    elif key == "rev":
-        cols_expected = ["Date_Debut", "Date_Fin", "Mois", "Annee", "Trimestre", "Taxi", "Chauffeur",
-                         "Meter_Deb", "Meter_Fin", "Meter_Total", "Fixe", "Brut", "Nb_Appels",
-                         "Redevance", "Base_Salaire", "Salaire", "STS", "Credits", "Prix_Fixes",
-                         "Visa", "Essence", "Lavage", "Divers", "Impot", "A_Remettre", "UUID"]
-
-    if not os.path.exists(FILES[key]):
-        df = pd.DataFrame(columns=cols_expected)
-        df.to_csv(FILES[key], index=False)
-        return df
-
     try:
         df = pd.read_csv(FILES[key])
-
-        # --- MIGRATION AUTOMATIQUE DES ANCIENS NOMS ---
-        # Si on trouve les anciens noms, on les renomme vers les nouveaux
-        rename_map = {}
-        if key == "rev":
-            rename_map = {
-                "Grand_Total_Remis": "A_Remettre",
-                "Total_Brut": "Brut",
-                "Salaire_Chauffeur": "Salaire"
-            }
-        elif key == "dep":
-            rename_map = {
-                "Montant_Total": "Total",
-                "Montant_HT": "HT"
-            }
-
-        # Appliquer le renommage si nécessaire
-        df = df.rename(columns=rename_map)
-
-        # --- AJOUT DES COLONNES MANQUANTES ---
-        # Si une colonne manque (ex: UUID dans un vieux fichier), on l'ajoute
-        for col in cols_expected:
-            if col not in df.columns:
-                df[col] = "" if col == "UUID" else 0.0
-                # Générer des UUIDs s'ils manquent
-                if col == "UUID":
-                    df["UUID"] = [str(uuid.uuid4()) for _ in range(len(df))]
-
-        # --- SÉCURISATION DES TYPES ---
-        # Force conversion texte
-        for col in ["Nom", "Prenom", "Taxi", "Chauffeur", "Date_Debut", "Date", "Mois", "Annee", "Trimestre", "UUID"]:
-            if col in df.columns: df[col] = df[col].astype(str)
-
-        # Force conversion numérique
-        num_cols = ["Total", "TPS", "TVQ", "Brut", "Salaire", "A_Remettre", "Essence", "Lavage"]
-        for col in num_cols:
-            if col in df.columns: df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0.0)
-
-        # Sauvegarder la version "propre" tout de suite
-        df = df[cols_expected]  # Réordonner proprement
-        df.to_csv(FILES[key], index=False)
-
+        if "UUID" not in df.columns:
+            df["UUID"] = [str(uuid.uuid4()) for _ in range(len(df))]
+        # Sécurisation String
+        for c in ["Nom", "Prenom", "Taxi", "Chauffeur", "Date_Debut", "Date", "License_ID", "Adresse", "Taxi_ID",
+                  "Categorie", "Details", "Source"]:
+            if c in df.columns: df[c] = df[c].astype(str).replace('nan', '')
         return df
-    except Exception as e:
-        st.error(f"Erreur fichier {key} : {e}")
-        return pd.DataFrame(columns=cols_expected)
+    except:
+        return pd.DataFrame()
 
 
 def save_data(key, df):
     df.to_csv(FILES[key], index=False)
 
 
-# --- MENU STYLE SITE WEB ---
-selected_menu = option_menu(
-    menu_title=None,
-    options=["Transactions", "Dépenses", "Chauffeurs", "Synthèse", "Paramètres"],
-    icons=["receipt", "wrench", "person-badge", "graph-up", "gear"],
-    menu_icon="cast",
-    default_index=0,
-    orientation="horizontal",
-    styles={
-        "container": {"padding": "0!important", "background-color": "#f0f2f6"},
-        "icon": {"color": "orange", "font-size": "18px"},
-        "nav-link": {"font-size": "16px", "text-align": "center", "margin": "0px", "--hover-color": "#eee"},
-        "nav-link-selected": {"background-color": "#008CBA"},
-    }
-)
+def get_liste_chauffeurs():
+    df = load_data("chauf")
+    return (df["Nom"] + " " + df["Prenom"]).tolist() if not df.empty else []
+
+
+def get_liste_taxis():
+    df = load_data("taxis")
+    return sorted(df["Taxi_ID"].unique().tolist()) if not df.empty else []
+
+
+def get_annees_disponibles():
+    years = set();
+    years.add(datetime.now().strftime("%Y"))
+    if os.path.exists(FILES["rev"]):
+        for r in csv.DictReader(open(FILES["rev"])):
+            if r['Annee']: years.add(r['Annee'])
+    return sorted(list(years), reverse=True)
+
 
 # --- SESSION STATE ---
 if 'edit_mode' not in st.session_state: st.session_state.edit_mode = False
@@ -143,78 +131,76 @@ def reset_form():
     st.session_state.form_data = {}
 
 
+# --- MENU ---
+selected_menu = option_menu(
+    menu_title=None,
+    options=["Transactions", "Dépenses", "Chauffeurs", "Flotte Taxis", "Synthèse", "Paramètres"],
+    icons=["receipt", "wrench", "person-badge", "car-front", "graph-up", "gear"],
+    menu_icon="cast", default_index=0, orientation="horizontal",
+    styles={"container": {"padding": "0!important", "background-color": "#f0f2f6"},
+            "nav-link-selected": {"background-color": "#008CBA"}}
+)
+
 # =============================================================================
-# 1. TRANSACTIONS (CRUD)
+# 1. TRANSACTIONS
 # =============================================================================
 if selected_menu == "Transactions":
-    st.subheader("📒 Gestion des Revenus Hebdomadaires")
-
+    st.subheader("📒 Revenus Hebdomadaires")
     df_rev = load_data("rev")
-    df_chauf = load_data("chauf")
-    l_chauf = (df_chauf["Nom"] + " " + df_chauf["Prenom"]).tolist() if not df_chauf.empty else []
+    l_taxis = [""] + get_liste_taxis()
+    l_chauf = [""] + get_liste_chauffeurs()
 
-    # --- LISTE (READ) ---
     col_list, col_form = st.columns([1, 1])
 
+    # LISTE
     with col_list:
-        st.info("👆 Sélectionnez une ligne pour modifier")
-
-        # Sécurisation si le tableau est vide
+        st.info("👆 Historique (Sélectionnez pour modifier)")
         if not df_rev.empty:
-            # On affiche uniquement les colonnes pertinentes
-            display_df = df_rev[["Date_Debut", "Taxi", "Chauffeur", "A_Remettre"]].sort_values("Date_Debut",
-                                                                                               ascending=False)
+            # Affichage formaté
+            df_display = df_rev[["Date_Debut", "Taxi", "Chauffeur", "Grand_Total_Remis"]].rename(
+                columns={"Grand_Total_Remis": "Net Perçu"}).sort_values("Date_Debut", ascending=False)
 
             event = st.dataframe(
-                display_df,
+                df_display,
                 use_container_width=True,
                 hide_index=True,
                 on_select="rerun",
-                selection_mode="single-row"
+                selection_mode="single-row",
+                column_config={"Net Perçu": st.column_config.NumberColumn(format="%.2f $")}
             )
 
             if event.selection.rows:
-                # Récupération intelligente de la ligne
-                idx_displayed = event.selection.rows[0]
-                # Retrouver l'index réel dans le dataframe complet
-                real_index = display_df.index[idx_displayed]
-                row_data = df_rev.loc[real_index]
-
+                idx = event.selection.rows[0]
+                real_idx = df_display.index[idx]
+                row_data = df_rev.loc[real_idx]
                 if st.button("Charger la sélection"):
                     st.session_state.edit_mode = True
                     st.session_state.edit_id = row_data["UUID"]
                     st.session_state.form_data = row_data.to_dict()
                     st.rerun()
-        else:
-            st.warning("Aucune transaction enregistrée.")
+        if st.button("Nouvelle Saisie (Vider)"): reset_form(); st.rerun()
 
-        if st.button("Vider / Nouvelle Saisie"):
-            reset_form()
-            st.rerun()
-
-    # --- FORMULAIRE (CREATE/UPDATE) ---
+    # FORMULAIRE
     with col_form:
-        f_title = f"✏️ Modifier Transaction" if st.session_state.edit_mode else "➕ Nouvelle Transaction"
-        mode_color = "orange" if st.session_state.edit_mode else "green"
-        st.markdown(f":{mode_color}[**{f_title}**]")
-
+        f_title = f"✏️ Modifier" if st.session_state.edit_mode else "➕ Nouvelle Transaction"
+        st.markdown(f"**{f_title}**")
         fd = st.session_state.form_data
 
-        with st.form("crud_trans_form"):
+        with st.form("crud_trans"):
             c1, c2 = st.columns(2)
             try:
                 d_val = pd.to_datetime(fd.get("Date_Debut", datetime.now()))
             except:
                 d_val = datetime.now()
-
             d_in = c1.date_input("Date Début", value=d_val)
-            t_in = c2.text_input("Taxi", value=fd.get("Taxi", ""))
 
-            c_idx = 0
-            if fd.get("Chauffeur") in l_chauf: c_idx = l_chauf.index(fd.get("Chauffeur"))
-            ch_in = c1.selectbox("Chauffeur", l_chauf, index=c_idx) if l_chauf else c1.text_input("Chauffeur (Nom)",
-                                                                                                  value=fd.get(
-                                                                                                      "Chauffeur", ""))
+            val_taxi = fd.get("Taxi", "")
+            idx_t = l_taxis.index(val_taxi) if val_taxi in l_taxis else 0
+            t_in = c2.selectbox("Taxi", l_taxis, index=idx_t)
+
+            val_chauf = fd.get("Chauffeur", "")
+            idx_c = l_chauf.index(val_chauf) if val_chauf in l_chauf else 0
+            ch_in = c1.selectbox("Chauffeur", l_chauf, index=idx_c)
 
             st.divider()
             c1, c2, c3, c4 = st.columns(4)
@@ -234,292 +220,352 @@ if selected_menu == "Transactions":
             lav = c2.number_input("Lavage", value=float(fd.get("Lavage", 0.0)))
             div = c3.number_input("Divers", value=float(fd.get("Divers", 0.0)))
 
-            # Action Buttons
-            c_save, c_del = st.columns([2, 1])
-            save_label = "Mettre à jour" if st.session_state.edit_mode else "Enregistrer"
-            submit = c_save.form_submit_button(save_label, type="primary", use_container_width=True)
-            delete = False
-            if st.session_state.edit_mode:
-                delete = c_del.form_submit_button("Supprimer", type="primary", use_container_width=True)
+            c_s, c_d = st.columns([2, 1])
+            sub = c_s.form_submit_button("Enregistrer/Modifier", type="primary", use_container_width=True)
+            dele = False
+            if st.session_state.edit_mode: dele = c_d.form_submit_button("Supprimer", type="secondary",
+                                                                         use_container_width=True)
 
-            if submit:
-                # Verif Doublons (Date + Taxi) en mode création
-                is_dup = False
-                if not st.session_state.edit_mode:
-                    if not df_rev.empty:
-                        check = df_rev[(df_rev['Date_Debut'] == str(d_in)) & (df_rev['Taxi'] == str(t_in))]
-                        if not check.empty:
-                            st.error("⛔ Doublon détecté (Date + Taxi) !")
-                            is_dup = True
+            if sub:
+                if t_in == "":
+                    st.error("⚠️ Taxi requis"); sub = False
+                elif ch_in == "":
+                    st.error("⚠️ Chauffeur requis"); sub = False
 
-                if not is_dup:
-                    mt = m_f - m_d
-                    brut = mt + fixe
-                    redev = nb * CONFIG["cout_appel"]
-                    base = brut - redev
-                    sal = base * (CONFIG["pct_chauf"] / 100)
-                    imp = sal * (CONFIG["taux_impot"] / 100)
-                    deducs = sts + cred + visa + ess + lav + div
-                    # On garde Prix_Fixes s'il existait en mémoire, sinon 0
-                    pf = float(fd.get("Prix_Fixes", 0.0))
-                    net = brut - sal - deducs + imp
+                if sub:
+                    is_dup = False
+                    if not st.session_state.edit_mode and not df_rev.empty:
+                        check = df_rev[
+                            (df_rev['Date_Debut'].astype(str) == str(d_in)) & (df_rev['Taxi'].astype(str) == str(t_in))]
+                        if not check.empty: st.error("⛔ Doublon détecté !"); is_dup = True
 
-                    row_data = {
-                        "Date_Debut": d_in, "Date_Fin": d_in + timedelta(days=6),
-                        "Mois": d_in.strftime("%Y-%m"), "Annee": str(d_in.year),
-                        "Trimestre": f"T{(d_in.month - 1) // 3 + 1}",
-                        "Taxi": t_in, "Chauffeur": ch_in,
-                        "Meter_Deb": m_d, "Meter_Fin": m_f, "Meter_Total": mt,
-                        "Fixe": fixe, "Brut": brut, "Nb_Appels": nb, "Redevance": redev,
-                        "Base_Salaire": base, "Salaire": round(sal, 2),
-                        "STS": sts, "Credits": cred, "Prix_Fixes": pf, "Visa": visa,
-                        "Essence": ess, "Lavage": lav, "Divers": div, "Impot": round(imp, 2),
-                        "A_Remettre": round(net, 2),
-                        "UUID": st.session_state.edit_id if st.session_state.edit_mode else str(uuid.uuid4())
-                    }
+                    if not is_dup:
+                        mt = m_f - m_d;
+                        brut = mt + fixe
+                        redev = nb * CONFIG["cout_appel"]
+                        base = brut - redev
+                        sal = base * (CONFIG["pct_chauf"] / 100)
+                        imp = sal * (CONFIG["taux_impot"] / 100)
+                        deducs = sts + cred + visa + ess + lav + div + float(fd.get("Prix_Fixes", 0.0))
+                        net = brut - sal - deducs + imp
 
-                    if st.session_state.edit_mode:
-                        df_rev = df_rev[df_rev.UUID != st.session_state.edit_id]
+                        row = {
+                            "Date_Debut": d_in, "Date_Fin": d_in + timedelta(days=6), "Mois": d_in.strftime("%Y-%m"),
+                            "Annee": str(d_in.year),
+                            "Trimestre": f"T{(d_in.month - 1) // 3 + 1}", "Taxi": t_in, "Chauffeur": ch_in,
+                            "Meter_Deb": m_d, "Meter_Fin": m_f, "Meter_Total": mt, "Fixe": fixe, "Total_Brut": brut,
+                            "Nb_Appels": nb,
+                            "Redevance": redev, "Base_Salaire": base, "Salaire_Chauffeur": round(sal, 2),
+                            "STS": sts, "Credits": cred, "Prix_Fixes": float(fd.get("Prix_Fixes", 0.0)), "Visa": visa,
+                            "Essence": ess, "Lavage": lav, "Divers": div, "Impot": round(imp, 2),
+                            "Grand_Total_Remis": round(net, 2),
+                            "UUID": st.session_state.edit_id if st.session_state.edit_mode else str(uuid.uuid4())
+                        }
+                        if st.session_state.edit_mode: df_rev = df_rev[df_rev.UUID != st.session_state.edit_id]
+                        df_rev = pd.concat([df_rev, pd.DataFrame([row])], ignore_index=True)
+                        save_data("rev", df_rev);
+                        st.success("Enregistré");
+                        reset_form();
+                        st.rerun()
 
-                    df_rev = pd.concat([df_rev, pd.DataFrame([row_data])], ignore_index=True)
-                    save_data("rev", df_rev)
-                    st.success("Enregistré !")
-                    reset_form()
-                    st.rerun()
-
-            if delete:
+            if dele:
                 df_rev = df_rev[df_rev.UUID != st.session_state.edit_id]
-                save_data("rev", df_rev)
-                st.warning("Supprimé !")
-                reset_form()
+                save_data("rev", df_rev);
+                st.warning("Supprimé");
+                reset_form();
                 st.rerun()
 
 # =============================================================================
-# 2. DEPENSES (CRUD)
+# 2. DEPENSES
 # =============================================================================
 elif selected_menu == "Dépenses":
     st.subheader("🔧 Dépenses Garage")
-    df_dep = load_data("dep")
-    df_chauf = load_data("chauf")
+    df_dep = load_data("dep");
+    l_taxis = [""] + get_liste_taxis();
+    l_chauf = [""] + get_liste_chauffeurs()
 
     col_list, col_form = st.columns([1, 1])
-
     with col_list:
-        st.info("Sélectionnez une dépense")
+        st.info("Sélectionnez pour modifier")
         if not df_dep.empty:
-            sorted_df = df_dep.sort_values("Date", ascending=False)
-            event = st.dataframe(sorted_df[["Date", "Taxi", "Categorie", "Total"]], use_container_width=True,
-                                 hide_index=True, on_select="rerun", selection_mode="single-row")
+            df_show = df_dep[["Date", "Taxi", "Categorie", "Montant_Total"]].sort_values("Date", ascending=False)
+
+            event = st.dataframe(
+                df_show,
+                use_container_width=True,
+                hide_index=True,
+                on_select="rerun",
+                selection_mode="single-row",
+                column_config={"Montant_Total": st.column_config.NumberColumn(format="%.2f $")}
+            )
 
             if event.selection.rows:
-                idx = event.selection.rows[0]
-                real_idx = sorted_df.index[idx]
+                idx = event.selection.rows[0];
+                real_idx = df_show.index[idx];
                 row_data = df_dep.loc[real_idx]
                 if st.button("Charger Dépense"):
-                    st.session_state.edit_mode = True
-                    st.session_state.edit_id = row_data["UUID"]
-                    st.session_state.form_data = row_data.to_dict()
+                    st.session_state.edit_mode = True;
+                    st.session_state.edit_id = row_data["UUID"];
+                    st.session_state.form_data = row_data.to_dict();
                     st.rerun()
-        else:
-            st.warning("Aucune dépense.")
-
         if st.button("Nouvelle Dépense"): reset_form(); st.rerun()
 
     with col_form:
         f_title = f"✏️ Modifier" if st.session_state.edit_mode else "➕ Ajouter"
         st.markdown(f"**{f_title}**")
         fd = st.session_state.form_data
-
         with st.form("crud_dep"):
             c1, c2 = st.columns(2)
             try:
                 d_val = pd.to_datetime(fd.get("Date", datetime.now()))
             except:
                 d_val = datetime.now()
-
             d_date = c1.date_input("Date", value=d_val)
-            d_taxi = c2.text_input("Taxi", value=fd.get("Taxi", ""))
+
+            t_val = fd.get("Taxi", "");
+            t_idx = l_taxis.index(t_val) if t_val in l_taxis else 0
+            d_taxi = c2.selectbox("Taxi", l_taxis, index=t_idx)
+
+            c_val = fd.get("Chauffeur", "");
+            c_idx = l_chauf.index(c_val) if c_val in l_chauf else 0
+            d_chauf = c1.selectbox("Chauffeur", l_chauf, index=c_idx)
 
             cat_idx = 0
-            if fd.get("Categorie") in CONFIG["cats"]: cat_idx = CONFIG["cats"].index(fd.get("Categorie"))
-            d_cat = c1.selectbox("Catégorie", CONFIG["cats"], index=cat_idx)
+            if fd.get("Categorie") in CONFIG["categories"]: cat_idx = CONFIG["categories"].index(fd.get("Categorie"))
+            d_cat = c2.selectbox("Catégorie", CONFIG["categories"], index=cat_idx)
 
             c1, c2 = st.columns(2)
-            d_tot = c1.number_input("Total ($)", value=float(fd.get("Total", 0.0)))
-            # Checkbox: Si TPS > 0, on coche par défaut
-            is_taxed = float(fd.get("TPS", 0.0)) > 0
-            tax_in = c2.checkbox("Taxes Incluses?", value=is_taxed)
+            mt_val = float(fd.get("Montant_Total", 0.0)) if "Montant_Total" in fd else float(fd.get("Total", 0.0))
+            d_tot = c1.number_input("Total ($)", value=mt_val)
+            tax_in = c2.checkbox("Taxes Incluses?", value=(float(fd.get("TPS", 0.0)) > 0))
+            d_det = st.text_input("Détails", value=fd.get("Details", ""))
 
-            c_s, c_d = st.columns(2)
-            sub = c_s.form_submit_button("Sauvegarder", type="primary")
-            dele = False
-            if st.session_state.edit_mode: dele = c_d.form_submit_button("Supprimer")
+            c_s, c_d = st.columns([2, 1])
+            sub = c_s.form_submit_button("Sauvegarder", type="primary", use_container_width=True)
+            dele = False;
+            if st.session_state.edit_mode: dele = c_d.form_submit_button("Supprimer", type="secondary")
 
             if sub:
-                if tax_in:
-                    div = 1 + (CONFIG["tps"] / 100) + (CONFIG["tvq"] / 100)
-                    ht = d_tot / div
-                    tps = ht * (CONFIG["tps"] / 100)
-                    tvq = ht * (CONFIG["tvq"] / 100)
-                else:
-                    ht, tps, tvq = d_tot, 0.0, 0.0
+                if d_taxi == "": st.error("Taxi requis"); sub = False
+                if sub:
+                    if tax_in:
+                        div = 1 + (CONFIG["tps"] / 100) + (CONFIG["tvq"] / 100)
+                        ht = d_tot / div;
+                        tps = ht * (CONFIG["tps"] / 100);
+                        tvq = ht * (CONFIG["tvq"] / 100)
+                    else:
+                        ht, tps, tvq = d_tot, 0.0, 0.0
 
-                row = {
-                    "Date": d_date, "Mois": d_date.strftime("%Y-%m"), "Annee": str(d_date.year),
-                    "Trimestre": f"T{(d_date.month - 1) // 3 + 1}", "Taxi": d_taxi,
-                    "Chauffeur": fd.get("Chauffeur", ""),
-                    "Categorie": d_cat, "Details": fd.get("Details", ""),
-                    "HT": round(ht, 2), "TPS": round(tps, 2), "TVQ": round(tvq, 2), "Total": d_tot,
-                    "UUID": st.session_state.edit_id if st.session_state.edit_mode else str(uuid.uuid4())
-                }
+                    row = {"Date": d_date, "Mois": d_date.strftime("%Y-%m"), "Annee": str(d_date.year),
+                           "Trimestre": f"T{(d_date.month - 1) // 3 + 1}",
+                           "Taxi": d_taxi, "Chauffeur": d_chauf, "Categorie": d_cat, "Details": d_det,
+                           "Montant_HT": round(ht, 2), "TPS": round(tps, 2), "TVQ": round(tvq, 2),
+                           "Montant_Total": d_tot,
+                           "UUID": st.session_state.edit_id if st.session_state.edit_mode else str(uuid.uuid4())}
 
-                if st.session_state.edit_mode: df_dep = df_dep[df_dep.UUID != st.session_state.edit_id]
-                df_dep = pd.concat([df_dep, pd.DataFrame([row])], ignore_index=True)
-                save_data("dep", df_dep)
-                st.success("Sauvegardé");
-                reset_form();
-                st.rerun()
-
+                    if st.session_state.edit_mode: df_dep = df_dep[df_dep.UUID != st.session_state.edit_id]
+                    df_dep = pd.concat([df_dep, pd.DataFrame([row])], ignore_index=True)
+                    save_data("dep", df_dep);
+                    st.success("Sauvegardé");
+                    reset_form();
+                    st.rerun()
             if dele:
                 df_dep = df_dep[df_dep.UUID != st.session_state.edit_id]
-                save_data("dep", df_dep)
-                st.success("Supprimé");
+                save_data("dep", df_dep);
+                st.warning("Supprimé");
                 reset_form();
                 st.rerun()
 
 # =============================================================================
-# 3. CHAUFFEURS (CRUD)
+# 3. CHAUFFEURS
 # =============================================================================
 elif selected_menu == "Chauffeurs":
     st.subheader("👨‍✈️ Gestion Chauffeurs")
     df_c = load_data("chauf")
-
     col_list, col_form = st.columns([1, 1])
     with col_list:
         if not df_c.empty:
-            event = st.dataframe(df_c[["Nom", "Prenom", "Telephone"]], on_select="rerun", selection_mode="single-row",
+            event = st.dataframe(df_c[["Nom", "Prenom", "License_ID"]], on_select="rerun", selection_mode="single-row",
                                  use_container_width=True, hide_index=True)
             if event.selection.rows:
-                idx = event.selection.rows[0]
-                # Fix pour retrouver la bonne ligne
-                real_idx = df_c.index[idx]
+                idx = event.selection.rows[0];
+                real_idx = df_c.index[idx];
                 row_data = df_c.loc[real_idx]
-                if st.button("Modifier Chauffeur"):
-                    st.session_state.edit_mode = True
-                    st.session_state.edit_id = row_data["UUID"]
-                    st.session_state.form_data = row_data.to_dict()
+                if st.button("Modifier"):
+                    st.session_state.edit_mode = True;
+                    st.session_state.edit_id = row_data["UUID"];
+                    st.session_state.form_data = row_data.to_dict();
                     st.rerun()
-        if st.button("Nouveau Chauffeur"): reset_form(); st.rerun()
+        if st.button("Nouveau"): reset_form(); st.rerun()
 
     with col_form:
         fd = st.session_state.form_data
         with st.form("crud_chauf"):
             n = st.text_input("Nom", value=fd.get("Nom", ""))
             p = st.text_input("Prénom", value=fd.get("Prenom", ""))
+            l = st.text_input("License ID (Pocket)", value=fd.get("License_ID", ""))
+            a = st.text_input("Adresse", value=fd.get("Adresse", ""))
             t = st.text_input("Téléphone", value=fd.get("Telephone", ""))
+            m = st.text_input("Matricule", value=fd.get("Matricule", ""))
+            nt = st.text_area("Note", value=fd.get("Note", ""))
 
             c1, c2 = st.columns(2)
             sub = c1.form_submit_button("Sauvegarder", type="primary")
             dele = False
             if st.session_state.edit_mode: dele = c2.form_submit_button("Supprimer")
 
-            if sub:
-                new = {"Nom": n, "Prenom": p, "Telephone": t, "Matricule": fd.get("Matricule", ""),
-                       "Note": fd.get("Note", ""),
+            if sub and n:
+                new = {"Nom": n, "Prenom": p, "License_ID": l, "Adresse": a, "Telephone": t, "Matricule": m, "Note": nt,
                        "UUID": st.session_state.edit_id if st.session_state.edit_mode else str(uuid.uuid4())}
                 if st.session_state.edit_mode: df_c = df_c[df_c.UUID != st.session_state.edit_id]
                 df_c = pd.concat([df_c, pd.DataFrame([new])], ignore_index=True)
-                save_data("chauf", df_c)
+                save_data("chauf", df_c);
+                st.success("Enregistré");
                 reset_form();
                 st.rerun()
-
             if dele:
                 df_c = df_c[df_c.UUID != st.session_state.edit_id]
-                save_data("chauf", df_c)
+                save_data("chauf", df_c);
+                st.warning("Supprimé");
                 reset_form();
                 st.rerun()
 
 # =============================================================================
-# 4. SYNTHÈSE (CORRIGÉE)
+# 4. FLOTTE TAXIS
+# =============================================================================
+elif selected_menu == "Flotte Taxis":
+    st.subheader("🚖 Gestion de la Flotte")
+    df_t = load_data("taxis")
+    l_chauf = [""] + get_liste_chauffeurs()
+
+    col_list, col_form = st.columns([1, 1])
+    with col_list:
+        if not df_t.empty:
+            event = st.dataframe(df_t[["Taxi_ID", "Chauffeur_Defaut"]], on_select="rerun", selection_mode="single-row",
+                                 use_container_width=True, hide_index=True)
+            if event.selection.rows:
+                idx = event.selection.rows[0];
+                real_idx = df_t.index[idx];
+                row_data = df_t.loc[real_idx]
+                if st.button("Modifier Taxi"):
+                    st.session_state.edit_mode = True;
+                    st.session_state.edit_id = row_data["UUID"];
+                    st.session_state.form_data = row_data.to_dict();
+                    st.rerun()
+        if st.button("Ajouter Taxi"): reset_form(); st.rerun()
+
+    with col_form:
+        fd = st.session_state.form_data
+        with st.form("crud_taxi"):
+            tid = st.text_input("Numéro Taxi (ex: 101)", value=fd.get("Taxi_ID", ""))
+            imm = st.text_input("Immatriculation", value=fd.get("Immatriculation", ""))
+
+            c_def_val = fd.get("Chauffeur_Defaut", "")
+            idx_def = l_chauf.index(c_def_val) if c_def_val in l_chauf else 0
+            c_def = st.selectbox("Chauffeur par Défaut (Optionnel)", l_chauf, index=idx_def)
+
+            c1, c2 = st.columns(2)
+            sub = c1.form_submit_button("Sauvegarder", type="primary")
+            dele = False
+            if st.session_state.edit_mode: dele = c2.form_submit_button("Supprimer")
+
+            if sub and tid:
+                new = {"Taxi_ID": tid, "Immatriculation": imm, "Chauffeur_Defaut": c_def,
+                       "UUID": st.session_state.edit_id if st.session_state.edit_mode else str(uuid.uuid4())}
+                if st.session_state.edit_mode: df_t = df_t[df_t.UUID != st.session_state.edit_id]
+                df_t = pd.concat([df_t, pd.DataFrame([new])], ignore_index=True)
+                save_data("taxis", df_t);
+                st.success("Enregistré");
+                reset_form();
+                st.rerun()
+            if dele:
+                df_t = df_t[df_t.UUID != st.session_state.edit_id]
+                save_data("taxis", df_t);
+                st.warning("Supprimé");
+                reset_form();
+                st.rerun()
+
+# =============================================================================
+# 5. SYNTHÈSE
 # =============================================================================
 elif selected_menu == "Synthèse":
-    st.header("📊 Tableau de Bord Financier")
-    df_rev = load_data("rev")
+    st.header("📊 Tableau de Bord")
+    df_rev = load_data("rev");
     df_dep = load_data("dep")
 
-    # Filtres
     years = sorted(list(set(df_rev["Annee"].astype(str).tolist() + df_dep["Annee"].astype(str).tolist())), reverse=True)
     if not years: years = [str(datetime.now().year)]
-
     c1, c2 = st.columns(2)
-    sel_y = c1.selectbox("Année", years)
+    sel_y = c1.selectbox("Année", years);
     sel_v = c2.selectbox("Regroupement", ["Mois", "Trimestre", "Annuel"])
 
-    # --- CALCULS ---
+    # 1. REVENUS
     df_r = df_rev[df_rev["Annee"].astype(str) == str(sel_y)].copy()
-    df_d = df_dep[df_dep["Annee"].astype(str) == str(sel_y)].copy()
+    for c in ["Salaire_Chauffeur", "Grand_Total_Remis", "Total_Brut", "Essence", "Lavage"]:
+        if c in df_r.columns: df_r[c] = pd.to_numeric(df_r[c], errors='coerce').fillna(0)
 
-    # Taxes implicites
     div = 1 + (CONFIG["tps"] / 100) + (CONFIG["tvq"] / 100)
     df_r["Ess_TPS"] = ((df_r["Essence"] + df_r["Lavage"]) / div) * (CONFIG["tps"] / 100)
     df_r["Ess_TVQ"] = ((df_r["Essence"] + df_r["Lavage"]) / div) * (CONFIG["tvq"] / 100)
 
     grp = "Mois" if sel_v == "Mois" else ("Trimestre" if sel_v == "Trimestre" else "Annee")
+    syn_r = df_r.groupby(grp)[["Total_Brut", "Salaire_Chauffeur", "Grand_Total_Remis", "Ess_TPS", "Ess_TVQ"]].sum()
 
-    # Groupement REVENUS
-    syn_r = pd.DataFrame()
-    if not df_r.empty:
-        syn_r = df_r.groupby(grp)[["Brut", "Salaire", "A_Remettre", "Ess_TPS", "Ess_TVQ"]].sum()
+    # 2. DEPENSES
+    df_d = df_dep[df_dep["Annee"].astype(str) == str(sel_y)].copy()
+    if sel_v == "Trimestre": df_d["Trimestre"] = "T" + ((pd.to_datetime(df_d["Date"]).dt.month - 1) // 3 + 1).astype(
+        str)
+    grp_d = "Mois" if sel_v == "Mois" else ("Trimestre" if sel_v == "Trimestre" else "Annee")
+    for c in ["Montant_Total", "TPS", "TVQ"]:
+        if c in df_d.columns: df_d[c] = pd.to_numeric(df_d[c], errors='coerce').fillna(0)
+    syn_d = df_d.groupby(grp_d)[["Montant_Total", "TPS", "TVQ"]].sum()
 
-    # Groupement DEPENSES
-    syn_d = pd.DataFrame()
-    if not df_d.empty:
-        if sel_v == "Trimestre":
-            df_d["Trimestre"] = "T" + ((pd.to_datetime(df_d["Date"]).dt.month - 1) // 3 + 1).astype(str)
-        col_grp_d = "Trimestre" if sel_v == "Trimestre" else ("Mois" if sel_v == "Mois" else "Annee")
-        syn_d = df_d.groupby(col_grp_d)[["Total", "TPS", "TVQ"]].sum()
-
-    # Fusion
+    # 3. FUSION
     final = syn_r.join(syn_d, lsuffix="_r", rsuffix="_d", how="outer").fillna(0)
-
     final["TPS à Recevoir"] = final.get("Ess_TPS", 0) + final.get("TPS", 0)
     final["TVQ à Recevoir"] = final.get("Ess_TVQ", 0) + final.get("TVQ", 0)
-    final["PROFIT NET"] = final.get("A_Remettre", 0) - final.get("Total", 0)
+    final["PROFIT NET"] = final.get("Grand_Total_Remis", 0) - final.get("Montant_Total", 0)
 
-    final = final.rename(columns={"Brut": "Revenu Brut", "Salaire": "Salaire (40%)", "A_Remettre": "Net Perçu",
-                                  "Total": "Dépenses Garage"})
-    cols = ["Revenu Brut", "Salaire (40%)", "Net Perçu", "Dépenses Garage", "TPS à Recevoir", "TVQ à Recevoir",
-            "PROFIT NET"]
+    final = final.rename(
+        columns={"Total_Brut": "Revenu BRUT", "Salaire_Chauffeur": "Salaire (40%)", "Grand_Total_Remis": "Net Perçu",
+                 "Montant_Total": "Dépenses Garage"})
 
-    st.subheader(f"Synthèse {sel_y}")
-    # On affiche seulement les colonnes qui existent
-    cols_present = [c for c in cols if c in final.columns]
-    st.dataframe(final[cols_present].style.format("{:.2f} $"), use_container_width=True)
+    # Formatage Spécifique des Colonnes Chiffrées (Pour éviter l'erreur de formattage sur string)
+    cols_money = ["Revenu BRUT", "Salaire (40%)", "Net Perçu", "Dépenses Garage", "TPS à Recevoir", "TVQ à Recevoir",
+                  "PROFIT NET"]
 
-    c1, c2, c3 = st.columns(3)
-    if not final.empty:
-        c1.metric("TPS à Recevoir", f"{final['TPS à Recevoir'].sum():.2f} $")
-        c2.metric("TVQ à Recevoir", f"{final['TVQ à Recevoir'].sum():.2f} $")
-        c3.metric("Profit Net", f"{final['PROFIT NET'].sum():.2f} $")
+    # Création d'un dict de config seulement pour les colonnes qui existent
+    col_conf = {}
+    for c in cols_money:
+        if c in final.columns:
+            col_conf[c] = st.column_config.NumberColumn(format="%.2f $")
+
+    st.dataframe(final, column_config=col_conf, use_container_width=True)
 
     st.divider()
     st.subheader("Détail Audit Taxes")
     audit = []
-    if not df_d.empty:
-        for _, r in df_d.iterrows():
-            if r.get("TPS", 0) > 0: audit.append(
-                {"Date": r["Date"], "Source": r["Categorie"], "TPS": r["TPS"], "TVQ": r["TVQ"], "Total": r["Total"]})
-    if not df_r.empty:
-        for _, r in df_r.iterrows():
-            if r.get("Ess_TPS", 0) > 0: audit.append(
-                {"Date": r["Date_Debut"], "Source": "Essence/Lavage", "TPS": r["Ess_TPS"], "TVQ": r["Ess_TVQ"],
-                 "Total": r["Essence"] + r["Lavage"]})
+    for _, r in df_d.iterrows():
+        if r.get("TPS", 0) > 0: audit.append(
+            {"Date": r["Date"], "Source": r["Categorie"], "TPS": r["TPS"], "TVQ": r["TVQ"],
+             "Total TTC": r["Montant_Total"]})
+    for _, r in df_r.iterrows():
+        if r.get("Ess_TPS", 0) > 0: audit.append(
+            {"Date": r["Date_Debut"], "Source": "Essence/Lavage", "TPS": r["Ess_TPS"], "TVQ": r["Ess_TVQ"],
+             "Total TTC": r["Essence"] + r["Lavage"]})
+
     if audit:
-        st.dataframe(pd.DataFrame(audit).sort_values("Date", ascending=False).style.format("{:.2f} $"),
-                     use_container_width=True)
+        df_audit = pd.DataFrame(audit).sort_values("Date", ascending=False)
+        # Config colonnes Audit
+        audit_conf = {
+            "TPS": st.column_config.NumberColumn(format="%.2f $"),
+            "TVQ": st.column_config.NumberColumn(format="%.2f $"),
+            "Total TTC": st.column_config.NumberColumn(format="%.2f $")
+        }
+        st.dataframe(df_audit, column_config=audit_conf, use_container_width=True, hide_index=True)
 
 # =============================================================================
-# 5. PARAMETRES
+# 6. PARAMETRES
 # =============================================================================
 elif selected_menu == "Paramètres":
     st.header("⚙️ Configuration")
@@ -530,9 +576,11 @@ elif selected_menu == "Paramètres":
         ni = c1.number_input("% Impôt", value=CONFIG["taux_impot"])
         nt = c1.number_input("% TPS", value=CONFIG["tps"])
         nv = c2.number_input("% TVQ", value=CONFIG["tvq"])
-        cats = st.text_area("Catégories", value="\n".join(CONFIG["cats"]))
+        cat = st.text_area("Catégories", value="\n".join(CONFIG["categories"]))
         if st.form_submit_button("Sauvegarder"):
             save_config({"cout_appel": nc, "pct_chauf": np, "taux_impot": ni, "tps": nt, "tvq": nv,
-                         "cats": [x.strip() for x in cats.split('\n') if x.strip()]})
+                         "categories": [x.strip() for x in cat.split('\n') if x.strip()]})
             st.success("Sauvegardé !");
             st.rerun()
+
+verifier_fichiers()
