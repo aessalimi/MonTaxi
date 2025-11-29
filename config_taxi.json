@@ -1,6 +1,5 @@
 {
     "cout_appel": 1.05,
-    "pct_chauf": 40.0,
     "taux_impot": 18.0,
     "taux_tps": 5.0,
     "taux_tvq": 9.975,
@@ -13,8 +12,4 @@
         "Frais administratifs",
         "Achat Pi\u00e8ces",
         "Divers"
-    ],
-    "pourcent_chauffeur": 40.0,
-    "tps": 5.0,
-    "tvq": 9.975
 }
