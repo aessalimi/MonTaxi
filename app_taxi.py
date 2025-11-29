@@ -21,9 +21,13 @@ FILES = {
 
 BG_JAUNE = "#FFFFE0"
 
+# CONFIGURATION PAR DÉFAUT
 DEFAULT_CONFIG = {
-    "cout_appel": 1.05, "pct_chauf": 40.0, "taux_impot": 18.0,
-    "taux_tps": 5.0, "taux_tvq": 9.975,
+    "cout_appel": 1.05,
+    "pct_chauf": 40.0,
+    "taux_impot": 18.0,
+    "taux_tps": 5.0,
+    "taux_tvq": 9.975,
     "categories": ["Réparation mécanique", "Carrosserie", "Pneus", "Assurance", "SAAQ", "Admin", "Pièces", "Autre"]
 }
 
@@ -33,7 +37,12 @@ def charger_config():
     config = DEFAULT_CONFIG.copy()
     if os.path.exists(FILES["conf"]):
         try:
-            config.update(json.load(open(FILES["conf"], 'r', encoding='utf-8')))
+            saved = json.load(open(FILES["conf"], 'r', encoding='utf-8'))
+            if "cats" in saved: saved["categories"] = saved.pop("cats")
+            config.update(saved)
+            # Sécurité clés manquantes
+            for k, v in DEFAULT_CONFIG.items():
+                if k not in config: config[k] = v
         except:
             pass
     return config
@@ -56,17 +65,16 @@ def safe_float(valeur):
 
 
 def verifier_fichiers():
-    cols_schema = {
-        "dep": ["Date", "Mois", "Annee", "Trimestre", "Taxi", "Chauffeur", "Categorie", "Details", "HT", "TPS", "TVQ",
-                "Montant_Total", "UUID"],
-        "chauf": ["Nom", "Prenom", "License_ID", "Adresse", "Matricule", "Telephone", "Note", "UUID"],
-        "taxis": ["Taxi_ID", "Immatriculation", "Chauffeur_Defaut", "UUID"],
-        "rev": ["Date_Debut", "Date_Fin", "Mois", "Annee", "Trimestre", "Taxi", "Chauffeur",
+    cols_dep = ["Date", "Mois", "Annee", "Trimestre", "Taxi", "Chauffeur", "Categorie", "Details", "HT", "TPS", "TVQ",
+                "Montant_Total", "UUID"]
+    cols_chauf = ["Nom", "Prenom", "License_ID", "Adresse", "Matricule", "Telephone", "Note", "UUID"]
+    cols_taxis = ["Taxi_ID", "Immatriculation", "Chauffeur_Defaut", "UUID"]
+    cols_rev = ["Date_Debut", "Date_Fin", "Mois", "Annee", "Trimestre", "Taxi", "Chauffeur",
                 "Meter_Deb", "Meter_Fin", "Meter_Total", "Fixe", "Total_Brut", "Nb_Appels",
                 "Redevance", "Base_Salaire", "Salaire_Chauffeur", "STS", "Credits", "Prix_Fixes",
                 "Visa", "Essence", "Lavage", "Divers", "Impot", "Grand_Total_Remis", "UUID"]
-    }
-    for key, cols in cols_schema.items():
+
+    for key, cols in [("dep", cols_dep), ("chauf", cols_chauf), ("taxis", cols_taxis), ("rev", cols_rev)]:
         if not os.path.exists(FILES[key]):
             pd.DataFrame(columns=cols).to_csv(FILES[key], index=False)
         else:
@@ -87,9 +95,8 @@ def load_data(key):
         df = pd.read_csv(FILES[key])
         if "UUID" not in df.columns:
             df["UUID"] = [str(uuid.uuid4()) for _ in range(len(df))]
-        # Sécurisation String
-        for c in ["Nom", "Prenom", "Taxi", "Chauffeur", "Date_Debut", "Date", "License_ID", "Adresse", "Taxi_ID",
-                  "Categorie", "Details", "Source"]:
+        cols_txt = ["Nom", "Prenom", "Taxi", "Chauffeur", "Date_Debut", "Date", "License_ID", "Adresse", "Taxi_ID"]
+        for c in cols_txt:
             if c in df.columns: df[c] = df[c].astype(str).replace('nan', '')
         return df
     except:
@@ -108,6 +115,13 @@ def get_liste_chauffeurs():
 def get_liste_taxis():
     df = load_data("taxis")
     return sorted(df["Taxi_ID"].unique().tolist()) if not df.empty else []
+
+
+def get_default_driver_for_taxi(taxi_id):
+    df = load_data("taxis")
+    res = df[df["Taxi_ID"].astype(str) == str(taxi_id)]
+    if not res.empty: return res.iloc[0]["Chauffeur_Defaut"]
+    return None
 
 
 def get_annees_disponibles():
@@ -156,16 +170,11 @@ if selected_menu == "Transactions":
     with col_list:
         st.info("👆 Historique (Sélectionnez pour modifier)")
         if not df_rev.empty:
-            # Affichage formaté
             df_display = df_rev[["Date_Debut", "Taxi", "Chauffeur", "Grand_Total_Remis"]].rename(
                 columns={"Grand_Total_Remis": "Net Perçu"}).sort_values("Date_Debut", ascending=False)
 
             event = st.dataframe(
-                df_display,
-                use_container_width=True,
-                hide_index=True,
-                on_select="rerun",
-                selection_mode="single-row",
+                df_display, use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row",
                 column_config={"Net Perçu": st.column_config.NumberColumn(format="%.2f $")}
             )
 
@@ -194,11 +203,17 @@ if selected_menu == "Transactions":
                 d_val = datetime.now()
             d_in = c1.date_input("Date Début", value=d_val)
 
+            # Selection Taxi
             val_taxi = fd.get("Taxi", "")
             idx_t = l_taxis.index(val_taxi) if val_taxi in l_taxis else 0
             t_in = c2.selectbox("Taxi", l_taxis, index=idx_t)
 
+            # Auto-select Chauffeur (Seulement si nouveau et taxi selectionné)
             val_chauf = fd.get("Chauffeur", "")
+            if not val_chauf and t_in and not st.session_state.edit_mode:
+                def_driver = get_default_driver_for_taxi(t_in)
+                if def_driver: val_chauf = def_driver
+
             idx_c = l_chauf.index(val_chauf) if val_chauf in l_chauf else 0
             ch_in = c1.selectbox("Chauffeur", l_chauf, index=idx_c)
 
@@ -233,11 +248,12 @@ if selected_menu == "Transactions":
                     st.error("⚠️ Chauffeur requis"); sub = False
 
                 if sub:
+                    # Verif Doublon
                     is_dup = False
                     if not st.session_state.edit_mode and not df_rev.empty:
                         check = df_rev[
                             (df_rev['Date_Debut'].astype(str) == str(d_in)) & (df_rev['Taxi'].astype(str) == str(t_in))]
-                        if not check.empty: st.error("⛔ Doublon détecté !"); is_dup = True
+                        if not check.empty: st.error("⛔ Doublon détecté (Date + Taxi) !"); is_dup = True
 
                     if not is_dup:
                         mt = m_f - m_d;
@@ -291,11 +307,7 @@ elif selected_menu == "Dépenses":
             df_show = df_dep[["Date", "Taxi", "Categorie", "Montant_Total"]].sort_values("Date", ascending=False)
 
             event = st.dataframe(
-                df_show,
-                use_container_width=True,
-                hide_index=True,
-                on_select="rerun",
-                selection_mode="single-row",
+                df_show, use_container_width=True, hide_index=True, on_select="rerun", selection_mode="single-row",
                 column_config={"Montant_Total": st.column_config.NumberColumn(format="%.2f $")}
             )
 
@@ -486,7 +498,7 @@ elif selected_menu == "Flotte Taxis":
                 st.rerun()
 
 # =============================================================================
-# 5. SYNTHÈSE
+# 5. SYNTHÈSE (ENRICHIE)
 # =============================================================================
 elif selected_menu == "Synthèse":
     st.header("📊 Tableau de Bord")
@@ -530,39 +542,45 @@ elif selected_menu == "Synthèse":
         columns={"Total_Brut": "Revenu BRUT", "Salaire_Chauffeur": "Salaire (40%)", "Grand_Total_Remis": "Net Perçu",
                  "Montant_Total": "Dépenses Garage"})
 
-    # Formatage Spécifique des Colonnes Chiffrées (Pour éviter l'erreur de formattage sur string)
-    cols_money = ["Revenu BRUT", "Salaire (40%)", "Net Perçu", "Dépenses Garage", "TPS à Recevoir", "TVQ à Recevoir",
-                  "PROFIT NET"]
-
-    # Création d'un dict de config seulement pour les colonnes qui existent
-    col_conf = {}
-    for c in cols_money:
-        if c in final.columns:
-            col_conf[c] = st.column_config.NumberColumn(format="%.2f $")
-
-    st.dataframe(final, column_config=col_conf, use_container_width=True)
+    # 4. AFFICHAGE INDICATEURS GLOBAUX (NOUVEAU)
+    st.markdown("#### Totaux de la Période")
+    k1, k2, k3 = st.columns(3)
+    k1.metric("💰 Revenu Brut", f"{final['Revenu BRUT'].sum():.2f} $")
+    k2.metric("👨‍✈️ Salaires Versés (40%)", f"{final['Salaire (40%)'].sum():.2f} $")
+    k3.metric("🏦 PROFIT NET", f"{final['PROFIT NET'].sum():.2f} $", delta="Après Dépenses Garage")
 
     st.divider()
-    st.subheader("Détail Audit Taxes")
+    k4, k5 = st.columns(2)
+    k4.metric("Total TPS à Recevoir", f"{final['TPS à Recevoir'].sum():.2f} $")
+    k5.metric("Total TVQ à Recevoir", f"{final['TVQ à Recevoir'].sum():.2f} $")
+
+    st.divider()
+    st.subheader(f"Détail {sel_v}")
+
+    cols_show = ["Revenu BRUT", "Salaire (40%)", "Net Perçu", "Dépenses Garage", "TPS à Recevoir", "TVQ à Recevoir",
+                 "PROFIT NET"]
+    # Config des colonnes
+    col_conf = {c: st.column_config.NumberColumn(format="%.2f $") for c in cols_show}
+    st.dataframe(final[cols_show], column_config=col_conf, use_container_width=True)
+
+    st.divider()
+    st.caption("Détail Audit Taxes")
     audit = []
     for _, r in df_d.iterrows():
         if r.get("TPS", 0) > 0: audit.append(
             {"Date": r["Date"], "Source": r["Categorie"], "TPS": r["TPS"], "TVQ": r["TVQ"],
-             "Total TTC": r["Montant_Total"]})
+             "Total": r["Montant_Total"]})
     for _, r in df_r.iterrows():
         if r.get("Ess_TPS", 0) > 0: audit.append(
             {"Date": r["Date_Debut"], "Source": "Essence/Lavage", "TPS": r["Ess_TPS"], "TVQ": r["Ess_TVQ"],
-             "Total TTC": r["Essence"] + r["Lavage"]})
-
+             "Total": r["Essence"] + r["Lavage"]})
     if audit:
-        df_audit = pd.DataFrame(audit).sort_values("Date", ascending=False)
-        # Config colonnes Audit
-        audit_conf = {
+        aud_df = pd.DataFrame(audit).sort_values("Date", ascending=False)
+        st.dataframe(aud_df, column_config={
             "TPS": st.column_config.NumberColumn(format="%.2f $"),
             "TVQ": st.column_config.NumberColumn(format="%.2f $"),
-            "Total TTC": st.column_config.NumberColumn(format="%.2f $")
-        }
-        st.dataframe(df_audit, column_config=audit_conf, use_container_width=True, hide_index=True)
+            "Total": st.column_config.NumberColumn(format="%.2f $")
+        }, use_container_width=True)
 
 # =============================================================================
 # 6. PARAMETRES
