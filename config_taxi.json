@@ -1,0 +1,17 @@
+{
+    "cout_appel": 1.05,
+    "pct_chauf": 40.0,
+    "taux_impot": 18.0,
+    "tps": 5.0,
+    "tvq": 9.975,
+    "categories": [
+        "R\u00e9paration m\u00e9canique",
+        "Carrosserie",
+        "Pneus",
+        "Assurance",
+        "SAAQ",
+        "Admin",
+        "Pi\u00e8ces",
+        "Autre"
+    ]
+}
