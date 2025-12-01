@@ -11,12 +11,11 @@ from datetime import datetime, timedelta
 from tkcalendar import DateEntry
 import sqlalchemy
 from sqlalchemy import create_engine, text
-import io
 
-# --- 1. CONFIGURATION ---
+# --- CONFIGURATION PAGE ---
 st.set_page_config(page_title="MonTaxi31", page_icon="🚖", layout="wide")
 
-# Connexion SQL (XAMPP)
+# --- CONNEXION SQL ---
 DB_CONNECTION = "mysql+pymysql://root:@localhost/montaxi31_db"
 try:
     engine = create_engine(DB_CONNECTION)
@@ -26,8 +25,8 @@ except Exception as e:
     st.error(f"🚨 Erreur SQL : {e}. Vérifiez XAMPP.")
     st.stop()
 
+# --- CONFIGURATION ---
 FILE_CONFIG = "config_taxi.json"
-BG_JAUNE = "#FFFFE0"
 DEFAULT_CONFIG = {
     "cout_appel": 1.05, "pct_chauf": 40.0, "taux_impot": 18.0,
     "tps": 5.0, "tvq": 9.975,
@@ -35,29 +34,33 @@ DEFAULT_CONFIG = {
 }
 
 
-# --- 2. FONCTIONS UTILITAIRES ---
+# --- FONCTIONS UTILITAIRES ---
 def safe_float(valeur):
     if not valeur: return 0.0
-    if isinstance(valeur, (float, int)): return float(valeur)
-    # Nettoyage : garde chiffres, point, virgule, moins
-    clean = re.sub(r"[^\d.,-]", "", str(valeur))
     try:
-        return float(clean.replace(',', '.'))
+        return float(str(valeur).replace(',', '.').replace('$', '').replace(' ', '').strip())
     except:
         return 0.0
 
 
 def charger_config():
+    # 1. Chargement par défaut
     config = DEFAULT_CONFIG.copy()
+    # 2. Tentative lecture fichier
     if os.path.exists(FILE_CONFIG):
         try:
-            saved = json.load(open(FILE_CONFIG, 'r', encoding='utf-8'))
+            with open(FILE_CONFIG, 'r', encoding='utf-8') as f:
+                saved = json.load(f)
             if "cats" in saved: saved["categories"] = saved.pop("cats")
             config.update(saved)
-            for k, v in DEFAULT_CONFIG.items():
-                if k not in config: config[k] = v
         except:
             pass
+
+    # 3. Sécurité Clés manquantes (Force l'ajout si tps/tvq absents)
+    for k, v in DEFAULT_CONFIG.items():
+        if k not in config: config[k] = v
+
+    # 4. Sauvegarde immédiate pour réparer le fichier
     with open(FILE_CONFIG, 'w', encoding='utf-8') as f:
         json.dump(config, f, indent=4)
     return config
@@ -104,7 +107,7 @@ def load_data(table):
             if c in df.columns: df[c] = df[c].astype(str).replace('nan', '').replace('None', '')
         return df
     except:
-        return pd.DataFrame(columns=SCHEMAS[table])
+        return pd.DataFrame()
 
 
 def save_data(table, df):
@@ -112,115 +115,113 @@ def save_data(table, df):
     df.to_sql(table, engine, if_exists='replace', index=False)
 
 
-# --- 3. INTELLIGENCE PDF MULTI-MOTEURS ---
+# --- INTELLIGENCE PDF (TRIPLE MOTEUR) ---
 def analyser_pdf(uploaded_file):
     data = {}
-    debug_text = "--- DIAGNOSTIC EXTRACTION ---\n"
+    debug_log = "--- DIAGNOSTIC LECTURE ---\n"
     full_text = ""
 
-    # A. PYPDF (Rapide et robuste pour le texte)
+    # 1. SAUVEGARDE TEMP (Contourne bug mémoire)
+    with open("temp_scan.pdf", "wb") as f:
+        f.write(uploaded_file.getbuffer())
+
+    # MOTEUR A : PYPDF (Texte Brut)
     try:
-        uploaded_file.seek(0)
-        reader = PdfReader(uploaded_file)
-        for page in reader.pages:
-            full_text += (page.extract_text() or "") + "\n"
-        if len(full_text) > 50: debug_text += "✅ Moteur 1 (PyPDF) : Succès.\n"
+        reader = PdfReader("temp_scan.pdf")
+        for page in reader.pages: full_text += (page.extract_text() or "") + "\n"
+        if len(full_text.strip()) > 10: debug_log += f"✅ PyPDF : {len(full_text)} chars lus.\n"
     except Exception as e:
-        debug_text += f"❌ Moteur 1 Erreur : {e}\n"
+        debug_log += f"❌ PyPDF : {e}\n"
 
-    # B. PDFPLUMBER (Si PyPDF insuffisant ou pour compléter)
-    try:
-        uploaded_file.seek(0)
-        with pdfplumber.open(uploaded_file) as pdf:
-            page = pdf.pages[0]
-            # Texte layout
-            text_layout = page.extract_text(layout=True) or ""
-            full_text += "\n" + text_layout
+    # MOTEUR B : PDFPLUMBER (Texte Layout + Tableaux)
+    if len(full_text.strip()) < 10:
+        try:
+            with pdfplumber.open("temp_scan.pdf") as pdf:
+                page = pdf.pages[0]
+                full_text = page.extract_text(layout=True) or ""
+                # Ajout contenu tableaux
+                tables = page.extract_tables()
+                for t in tables:
+                    for r in t:
+                        clean = " ".join([str(c) for c in r if c])
+                        full_text += "\n" + clean
+            if len(full_text.strip()) > 10: debug_log += f"✅ PDFPlumber : {len(full_text)} chars lus.\n"
+        except Exception as e:
+            debug_log += f"❌ PDFPlumber : {e}\n"
 
-            # Tableaux (Important pour vos fichiers)
-            tables = page.extract_tables()
-            if tables:
-                debug_text += f"✅ Moteur 2 (Tableaux) : {len(tables)} tableaux trouvés.\n"
-                for table in tables:
-                    for row in table:
-                        # On ajoute le contenu des tableaux au texte global pour la recherche
-                        row_clean = " ".join([str(c).replace('\n', '') for c in row if c])
-                        full_text += "\n" + row_clean
-    except Exception as e:
-        debug_text += f"❌ Moteur 2 Erreur : {e}\n"
+    # NETTOYAGE
+    if os.path.exists("temp_scan.pdf"): os.remove("temp_scan.pdf")
 
-    # Check final
-    if len(full_text.strip()) < 20:
-        return None, debug_text + "\n🚨 ECHEC TOTAL : Fichier vide ou image."
+    # DIAGNOSTIC FINAL
+    if not full_text.strip():
+        return None, debug_log + "\n🚨 RÉSULTAT : FICHIER VIDE OU IMAGE.\nCe PDF est un scan. Le logiciel ne peut pas lire les pixels.\nSolution : Saisissez les montants manuellement."
 
-    # --- ANALYSE ---
-    # Nettoyage pour recherche
-    search_text = re.sub(r'\n+', '\n', full_text)
+    # --- EXTRACTION DES DONNÉES ---
+    # On remplace les sauts de ligne multiples par un espace pour faciliter la regex
+    text_search = re.sub(r'\s+', ' ', full_text)
 
-    def get_val(keywords):
+    def find(keywords):
         if isinstance(keywords, str): keywords = [keywords]
         for k in keywords:
-            # Regex : Mot clé ... (n'importe quoi sur 2-3 lignes max) ... Chiffre
-            pattern = rf"{re.escape(k)}[\s\S]{{0,100}}?(-?[\d\s]+[.,]\d{{2}})"
-            match = re.search(pattern, search_text, re.IGNORECASE)
+            # Regex : Mot clé ... chiffres
+            # On cherche un motif large : Mot clé + jusqu'à 100 caractères + un montant
+            pattern = rf"{re.escape(k)}.*?(-?[\d\s]+[.,]\d{{2}})"
+            match = re.search(pattern, text_search, re.IGNORECASE)
             if match:
-                raw = match.group(1).replace(' ', '').replace(',', '.')
-                val = float(raw)
-                debug_text += f"   🔍 Trouvé : {k} -> {val}\n"
-                return abs(val)
+                try:
+                    val = float(match.group(1).replace(' ', '').replace(',', '.'))
+                    debug_log += f"   [OK] {k} -> {val}\n"
+                    return abs(val)
+                except:
+                    pass
         return 0.0
 
-    # Mapping
-    data["Meter_Total"] = get_val(["TOTAL SEMAINE METER", "TOTAL METER", "TOTAL:"])
-    if data["Meter_Total"] == 0:
-        # Secours : cherche un gros chiffre après TOTAL
-        m = re.search(r"TOTAL[\s\S]*?(-?[\d\s]+[.,]\d{2})", search_text, re.IGNORECASE)
-        if m: data["Meter_Total"] = safe_float(m.group(1))
+    data["Meter_Total"] = find(["TOTAL SEMAINE METER", "TOTAL METER", "TOTAL:"])
+    data["Fixe"] = find(["MONTANTS FIXES", "MONTANT FIXE"])
+    data["STS"] = find(["TOTAUX STS", "STS"])
+    data["Credits"] = find(["TOTAUX CREDITS", "CREDITS"])
+    data["Prix_Fixes"] = find(["TOTAUX PRIX FIXES", "PRIX FIXES"])
+    data["Visa"] = find(["TOTAUX VISE", "TOTAUX VISA", "DEBIT"])
+    data["Essence"] = find(["TOTAUX ESSENCE", "ESSENCE"])
+    data["Lavage"] = find(["LAVAGE AUTO", "LAVAGE"])
+    data["Divers"] = find(["DEPENSES"])
+    data["Impot"] = find(["POUR IMPOT", "IMPOT"])
 
-    data["Fixe"] = get_val(["FACTURES MONTANTS FIXES", "MONTANTS FIXES"])
-    data["STS"] = get_val(["TOTAUX STS", "STS"])
-    data["Credits"] = get_val(["TOTAUX CREDITS", "CREDITS"])
-    data["Prix_Fixes"] = get_val(["TOTAUX PRIX FIXES", "PRIX FIXES"])
-    data["Visa"] = get_val(["TOTAUX VISE", "TOTAUX VISA", "VISE/MASTER/DEBIT"])
-    data["Essence"] = get_val(["TOTAUX ESSENCE", "ESSENCE"])
-    data["Lavage"] = get_val(["LAVAGE AUTO", "LAVAGE"])
-    data["Divers"] = get_val(["DEPENSES (autre", "DEPENSES"])
-    data["Impot"] = get_val(["AJOUTER $ POUR IMPOT", "POUR IMPOT", "IMPOT"])
-
-    # Appels
-    mt_app = get_val(["NOMBRES D'APPELS X", "APPELS X"])
-    if mt_app > 0 and CONFIG["cout_appel"] > 0:
-        data["Nb_Appels"] = int(round(mt_app / CONFIG["cout_appel"]))
+    # Appels (Entier)
+    app_money = find(["NOMBRES D'APPELS X", "APPELS X"])
+    if app_money > 0:
+        data["Nb_Appels"] = int(round(app_money / CONFIG["cout_appel"]))
     else:
-        # Cherche entier simple
-        m_nb = re.search(r"NOMBRES D'APPELS.*?(\d+)", search_text, re.IGNORECASE)
-        if m_nb:
-            data["Nb_Appels"] = int(m_nb.group(1))
+        m = re.search(r"NOMBRES D'APPELS.*?(\d+)", text_search, re.IGNORECASE)
+        if m:
+            data["Nb_Appels"] = int(m.group(1))
         else:
             data["Nb_Appels"] = 0
 
-    # Date
-    m_date = re.search(r"LUNDI[:\s]*(\d{1,2})[\s\n]+([a-zA-Zéû]+)", search_text, re.IGNORECASE)
-    if m_date:
+    # Date & Taxi
+    # On cherche les motifs dans le texte brut original (avec sauts de ligne) pour la précision
+    mt = re.search(r"NO[:\s]*(\d+)", full_text);
+    if mt: data["Taxi"] = mt.group(1)
+
+    mc = re.search(r"CHAUFFEUR[:\s]*(.+)", full_text)
+    if mc:
+        row = mc.group(1).split("NO:")[0]
+        data["Chauffeur_Raw"] = row.strip()
+
+    md = re.search(r"LUNDI[:\s]*(\d{1,2})[\s\n]+([a-zA-Zéû]+)", full_text, re.IGNORECASE)
+    if md:
         try:
-            d, m_txt = int(m_date.group(1)), m_date.group(2).lower()[:3]
+            d, m_txt = int(md.group(1)), md.group(2).lower()[:3]
             m_map = {"jan": 1, "fev": 2, "fév": 2, "mar": 3, "avr": 4, "mai": 5, "jui": 6, "juil": 7, "aou": 8,
                      "aoû": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12, "déc": 12}
             m_num = 4
             for k, v in m_map.items():
-                if k in m_txt: m_num = v; break
+                if k in m_txt: m_num = v
             data["Date_Debut"] = datetime(datetime.now().year, m_num, d)
         except:
             pass
 
-    # Identifiants
-    mt = re.search(r"NO[:\s]*(\d+)", search_text)
-    if mt: data["Taxi"] = mt.group(1)
-
-    mc = re.search(r"CHAUFFEUR[:\s]*(.+)", search_text)
-    if mc: data["Chauffeur_Raw"] = mc.group(1).split("NO:")[0].strip()
-
-    return data, debug_text
+    return data, debug_log
 
 
 # --- HELPERS ---
@@ -348,6 +349,7 @@ if selected_menu == "Transactions":
         if st.button("Nouvelle Saisie (Vider)"): reset_form(); st.rerun()
 
     with col_form:
+        # IMPORT PDF
         with st.expander("📂 IMPORTER PDF", expanded=True):
             uploaded_pdf = st.file_uploader("Glisser fichier ici", type="pdf")
             if uploaded_pdf is not None:
@@ -364,11 +366,11 @@ if selected_menu == "Transactions":
                         st.success(f"Données extraites !");
                         st.rerun()
                     else:
-                        st.error("Données illisibles.")
+                        st.error("Aucune donnée trouvée.")
 
             if st.session_state.debug_log:
-                st.warning("🔍 DEBUG (Contenu lu) :")
-                st.text_area("", st.session_state.debug_log, height=150)
+                with st.expander("🔍 DIAGNOSTIC (Texte lu)"):
+                    st.text_area("", st.session_state.debug_log, height=200)
 
         tit = "Modifier" if st.session_state.edit_mode else "Nouveau"
         st.markdown(f"### {tit}")
