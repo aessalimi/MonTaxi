@@ -1,3 +1,7 @@
 streamlit
-streamlit-option-menu
 pandas
+sqlalchemy
+pymysql
+streamlit-option-menu
+pdfplumber
+pypdf
