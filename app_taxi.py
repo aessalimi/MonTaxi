@@ -8,7 +8,6 @@ import re
 import pdfplumber
 from pypdf import PdfReader
 from datetime import datetime, timedelta
-from tkcalendar import DateEntry
 import sqlalchemy
 from sqlalchemy import create_engine, text
 
